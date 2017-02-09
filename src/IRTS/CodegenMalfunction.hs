@@ -17,6 +17,7 @@ import Control.Monad
 import System.Process
 import System.Directory
 
+import qualified Data.Text as Text
 
 data Sexp = S [Sexp] | A String | KInt Int | KStr String
 
@@ -113,10 +114,24 @@ cgExp (SCon _ tag name args) = S (A "block": S [A "tag", KInt (tag `mod` 200)] :
 cgExp (SCase _ e cases) = cgSwitch e cases
 cgExp (SChkCase e cases) = cgSwitch e cases
 cgExp (SConst k) = cgConst k
-cgExp (SForeign fn ret args) = error "no FFI"
+cgExp (SForeign ret fn args) = cgForeign ret fn args
 cgExp (SOp prim args) = cgOp prim args
 cgExp SNothing = KInt 0
 cgExp (SError s) = S [A "apply", S [A "global", A "$Pervasives", A "$failwith"], KStr $ "error: " ++ show s]
+
+cgForeign :: FDesc -> FDesc -> [(FDesc, LVar)] -> Sexp
+cgForeign ret fn args = S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs args)
+  where
+    cgFDesc :: FDesc -> [Sexp]
+    cgFDesc (FCon name) = [cgName name]
+    cgFDesc (FStr str) = map (cgSym . Text.unpack) $ Text.splitOn (Text.pack ".") (Text.pack str)
+    cgFDesc FUnknown = undefined
+    cgFDesc (FIO fdesc) = undefined
+    cgFDesc (FApp name fdescs) = undefined
+
+    mkargs :: [(FDesc, LVar)] -> [Sexp]
+    mkargs [] = [KInt 0]
+    mkargs xs = map (cgVar . snd) xs
 
 cgSwitch e cases =
   S [A "let", S [scr, cgVar e],
