@@ -87,7 +87,18 @@ shuffle decls rest = prelude ++ toBindings (Graph.stronglyConnComp (map toNode d
                  S [A"apply", S[A"global", A"$String", A"$mapi"],
                     S[A"lambda", S[A"$i", A"$c"],
                       S[A"load.byte", A"$s", S[A"-", A"$n", A"$i"]]],
-                    A"$s"]]]]
+                    A"$s"]]]],
+      S [A"rec",
+         S [A"$%mklist",
+           S [A"lambda", S [A"$l"],
+              S [A"switch", A"$l",
+                 S [S [A"tag", KInt 0], KInt 0],
+                 S [S [A"tag", KInt 1], S [A"block", S [A"tag", KInt 0],
+                                                     S [A"field", KInt 1, A"$l"],
+                                                     S [A"apply", A"$%mklist", S [A"field", KInt 2, A"$l"]]]]]]]],
+      S [A"$%mkdatanoargs",
+         S [A"lambda", S [A"$c"],
+            S [A"field", KInt 0, A"$c"]]]
       ]
 
 
@@ -124,14 +135,23 @@ cgForeign ret fn args = S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs 
   where
     cgFDesc :: FDesc -> [Sexp]
     cgFDesc (FCon name) = [cgName name]
-    cgFDesc (FStr str) = map (cgSym . Text.unpack) $ Text.splitOn (Text.pack ".") (Text.pack str)
+    cgFDesc (FStr s) = map (cgSym . str) $ Text.splitOn (txt ".") (txt s)
     cgFDesc FUnknown = undefined
     cgFDesc (FIO fdesc) = undefined
     cgFDesc (FApp name fdescs) = undefined
 
     mkargs :: [(FDesc, LVar)] -> [Sexp]
     mkargs [] = [KInt 0]
-    mkargs xs = map (cgVar . snd) xs
+    mkargs xs = map mkargs' xs
+      where
+        mkargs' (FApp (UN ffiType) _, lv) =
+          case str ffiType of
+            "OCaml_List" -> S [A "apply", A "$%mklist", cgVar lv] 
+            "OCaml_Data_NoArgs" -> S [A "apply", A "$%mkdatanoargs", cgVar lv]
+            _ -> cgVar lv
+        mkargs' (_, lv) = cgVar lv
+    --mkargs xs = map (cgVar . snd) xs
+    
 
 cgSwitch e cases =
   S [A "let", S [scr, cgVar e],
@@ -168,7 +188,7 @@ cgSwitch e cases =
 
 arithSuffix (ATInt ITNative) = ""
 arithSuffix (ATInt ITChar) = ""
-arithSuffix (ATInt ITBig) = ".big"
+arithSuffix (ATInt ITBig) = ".ibig"
 arithSuffix s = error $ "unsupported arithmetic type: " ++ show s
 
 
