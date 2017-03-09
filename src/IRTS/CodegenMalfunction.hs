@@ -90,17 +90,25 @@ shuffle decls rest = prelude ++ toBindings (Graph.stronglyConnComp (map toNode d
                     A"$s"]]]],
       S [A"rec",
          S [A"$%mklist",
-           S [A"lambda", S [A"$l"],
+            S [A"lambda", S [A"$f", A"$l"],
               S [A"switch", A"$l",
                  S [S [A"tag", KInt 0], KInt 0],
                  S [S [A"tag", KInt 1], S [A"block", S [A"tag", KInt 0],
-                                                     S [A"field", KInt 1, A"$l"],
-                                                     S [A"apply", A"$%mklist", S [A"field", KInt 2, A"$l"]]]]]]]],
+                                                     S [A"apply", A"$f", S [A"field", KInt 1, A"$l"]],
+                                                     S [A"apply", A"$%mklist", A"$f", S [A"field", KInt 2, A"$l"]]]]]]]],
+      S [A"rec",
+         S [A"$%unmklist",
+            S [A"lambda", S [A"$f", A"$l"],
+               S [A"switch", A"$l",
+                  S [KInt 0, S [A"block", S [A"tag", KInt 0], KInt 0]],
+                  S [S [A"tag", KInt 0], S [A"block", S [A"tag", KInt 1],
+                                                         KInt 1, -- the hours I spent trying to figure out that I'd missed this line
+                                                         S [A"apply", A"$f", S [A"field", KInt 0, A"$l"]],
+                                                         S [A"apply", A"$%unmklist", A"$f", S [A"field", KInt 1, A"$l"]]]]]]]],
       S [A"$%mkdatanoargs",
          S [A"lambda", S [A"$c"],
             S [A"field", KInt 0, A"$c"]]]
       ]
-
 
 cgName :: Name -> Sexp
 cgName = cgSym . showCG
@@ -131,7 +139,7 @@ cgExp SNothing = KInt 0
 cgExp (SError s) = S [A "apply", S [A "global", A "$Pervasives", A "$failwith"], KStr $ "error: " ++ show s]
 
 cgForeign :: FDesc -> FDesc -> [(FDesc, LVar)] -> Sexp
-cgForeign ret fn args = S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs args)
+cgForeign ret fn args = S [A "apply", fromOCaml (ocamlType ret), S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs args)]
   where
     cgFDesc :: FDesc -> [Sexp]
     cgFDesc (FCon name) = [cgName name]
@@ -144,14 +152,29 @@ cgForeign ret fn args = S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs 
     mkargs [] = [KInt 0]
     mkargs xs = map mkargs' xs
       where
-        mkargs' (FApp (UN ffiType) _, lv) =
-          case str ffiType of
-            "OCaml_List" -> S [A "apply", A "$%mklist", cgVar lv] 
-            "OCaml_Data_NoArgs" -> S [A "apply", A "$%mkdatanoargs", cgVar lv]
-            _ -> cgVar lv
-        mkargs' (_, lv) = cgVar lv
-    --mkargs xs = map (cgVar . snd) xs
-    
+        mkargs' (fdesc, lv) = S [A "apply", toOCaml (ocamlType fdesc), cgVar lv]
+
+data OCaml_Type = OCaml_Int
+                | OCaml_Unit
+                | OCaml_String
+                | OCaml_List OCaml_Type
+
+ocamlType :: FDesc -> OCaml_Type
+ocamlType (FCon (UN ffiType))
+  | str ffiType == "OCaml_Int" = OCaml_Int
+  | str ffiType == "OCaml_Unit" = OCaml_Unit
+  | str ffiType == "OCaml_String" = OCaml_String
+ocamlType (FApp (UN ffiType) [_, elemType])
+  | str ffiType == "OCaml_List" = OCaml_List (ocamlType elemType)
+ocamlType what = error $ "urggh" ++ show what
+
+toOCaml :: OCaml_Type -> Sexp
+toOCaml (OCaml_List t) = S [A "apply", A "$%mklist", toOCaml t]
+toOCaml _ = S [A "lambda", S [A "$x"], A "$x"]
+
+fromOCaml :: OCaml_Type -> Sexp
+fromOCaml (OCaml_List t) = S [A "apply", A "$%unmklist", fromOCaml t]
+fromOCaml _ = S [A "lambda", S [A "$x"], A "$x"]
 
 cgSwitch e cases =
   S [A "let", S [scr, cgVar e],
