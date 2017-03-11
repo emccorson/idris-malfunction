@@ -104,11 +104,7 @@ shuffle decls rest = prelude ++ toBindings (Graph.stronglyConnComp (map toNode d
                   S [S [A"tag", KInt 0], S [A"block", S [A"tag", KInt 1],
                                                          KInt 1, -- the hours I spent trying to figure out that I'd missed this line
                                                          S [A"apply", A"$f", S [A"field", KInt 0, A"$l"]],
-                                                         S [A"apply", A"$%unmklist", A"$f", S [A"field", KInt 1, A"$l"]]]]]]]],
-      S [A"$%mkdatanoargs",
-         S [A"lambda", S [A"$c"],
-            S [A"field", KInt 0, A"$c"]]]
-      ]
+                                                         S [A"apply", A"$%unmklist", A"$f", S [A"field", KInt 1, A"$l"]]]]]]]]]
 
 cgName :: Name -> Sexp
 cgName = cgSym . showCG
@@ -139,14 +135,9 @@ cgExp SNothing = KInt 0
 cgExp (SError s) = S [A "apply", S [A "global", A "$Pervasives", A "$failwith"], KStr $ "error: " ++ show s]
 
 cgForeign :: FDesc -> FDesc -> [(FDesc, LVar)] -> Sexp
+cgForeign ret fn [] = S [A "apply", fromOCaml (ocamlType ret), S ((A "global") : cgFDesc fn)]
 cgForeign ret fn args = S [A "apply", fromOCaml (ocamlType ret), S ([A "apply", S ((A "global") : cgFDesc fn)] ++ mkargs args)]
   where
-    cgFDesc :: FDesc -> [Sexp]
-    cgFDesc (FCon name) = [cgName name]
-    cgFDesc (FStr s) = map (cgSym . str) $ Text.splitOn (txt ".") (txt s)
-    cgFDesc FUnknown = undefined
-    cgFDesc (FIO fdesc) = undefined
-    cgFDesc (FApp name fdescs) = undefined
 
     mkargs :: [(FDesc, LVar)] -> [Sexp]
     mkargs [] = [KInt 0]
@@ -154,27 +145,78 @@ cgForeign ret fn args = S [A "apply", fromOCaml (ocamlType ret), S ([A "apply", 
       where
         mkargs' (fdesc, lv) = S [A "apply", toOCaml (ocamlType fdesc), cgVar lv]
 
+cgFDesc :: FDesc -> [Sexp]
+cgFDesc (FCon name) = [cgName name]
+cgFDesc (FStr s) = map (cgSym . str) $ Text.splitOn (txt ".") (txt s)
+cgFDesc FUnknown = undefined
+cgFDesc (FIO fdesc) = undefined
+cgFDesc (FApp name fdescs) = undefined
+
 data OCaml_Type = OCaml_Int
                 | OCaml_Unit
                 | OCaml_String
+                | OCaml_Char
                 | OCaml_List OCaml_Type
+                | OCaml_Data [(Int, [OCaml_Type])]
+                deriving (Show)
 
 ocamlType :: FDesc -> OCaml_Type
-ocamlType (FCon (UN ffiType))
-  | str ffiType == "OCaml_Int" = OCaml_Int
-  | str ffiType == "OCaml_Unit" = OCaml_Unit
-  | str ffiType == "OCaml_String" = OCaml_String
-ocamlType (FApp (UN ffiType) [_, elemType])
-  | str ffiType == "OCaml_List" = OCaml_List (ocamlType elemType)
-ocamlType what = error $ "urggh" ++ show what
+ocamlType (FCon ffiType)
+  | ffiType == sUN "OCaml_Int" = OCaml_Int
+  | ffiType == sUN "OCaml_Unit" = OCaml_Unit
+  | ffiType == sUN "OCaml_String" = OCaml_String
+  | ffiType == sUN "OCaml_Char" = OCaml_Char
+ocamlType (FApp (UN ffiType) params)
+  | str ffiType == "OCaml_List" = OCaml_List (ocamlType $ params !! 1)
+  | str ffiType == "OCaml_Data" = OCaml_Data (ocamlData $ head params)
+ocamlType what = error $ "ocamlType: " ++ show what
+
+ocamlData :: FDesc -> [(Int, [OCaml_Type])]
+ocamlData = (withTags 0 0) . ocamlData'
+  where
+    ocamlData' :: FDesc -> [[OCaml_Type]]
+    ocamlData' (FApp fn _) | fn == sUN "Nil" = []
+    ocamlData' (FApp fn [_,t,ts]) | fn == sUN "::" = ocamlCon t : ocamlData' ts
+    ocamlData' what = error $ "ocamlData': oh no: " ++ show what
+
+    withTags :: Int -> Int -> [[OCaml_Type]] -> [(Int, [OCaml_Type])]
+    withTags _ _ [] = []
+    withTags zeroargs someargs ([] : ts) = (zeroargs, []) : withTags (zeroargs + 1) someargs ts
+    withTags zeroargs someargs (t : ts) = (someargs, t) : withTags zeroargs (someargs + 1) ts
+
+ocamlCon :: FDesc -> [OCaml_Type]
+ocamlCon (FApp fn _) | fn == sUN "Nil" = []
+ocamlCon (FApp fn [_,_,_,t]) | fn == sUN "MkDPair" = [ocamlType t]
+ocamlCon (FApp fn [_,t,ts]) | fn == sUN "::" = ocamlCon t ++ ocamlCon ts
+ocamlCon what = error $ "ocamlCon: oh no: " ++ show what
 
 toOCaml :: OCaml_Type -> Sexp
 toOCaml (OCaml_List t) = S [A "apply", A "$%mklist", toOCaml t]
+toOCaml (OCaml_Data d) = mkdata d 
 toOCaml _ = S [A "lambda", S [A "$x"], A "$x"]
 
 fromOCaml :: OCaml_Type -> Sexp
 fromOCaml (OCaml_List t) = S [A "apply", A "$%unmklist", fromOCaml t]
+fromOCaml (OCaml_Data d) = unmkdata d
 fromOCaml _ = S [A "lambda", S [A "$x"], A "$x"]
+
+mkdata :: [(Int, [OCaml_Type])] -> Sexp
+mkdata d = S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ map mkcase (zip [0..] d))]
+  where
+    mkcase :: (Int, (Int, [OCaml_Type])) -> Sexp
+    mkcase (idristag, (ocamlint, [])) = S [S [A"tag", KInt idristag], KInt ocamlint]
+    mkcase (idristag, (ocamltag, tys)) =
+      S [S [A"tag", KInt idristag], S ([A"block", S [A"tag", KInt ocamltag]] ++
+        map (\(i,ty) -> S [A"apply", toOCaml ty, S [A"field", KInt i, A"$d"]]) (zip [1..] tys))]
+
+unmkdata :: [(Int, [OCaml_Type])] -> Sexp
+unmkdata d = S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ map mkcase (zip [0..] d))]
+  where
+    mkcase :: (Int, (Int, [OCaml_Type])) -> Sexp
+    mkcase (idristag, (ocamlint, [])) = S [KInt ocamlint, S [A"block", S [A"tag", KInt idristag], KInt idristag]]
+    mkcase (idristag, (ocamltag, tys)) =
+      S [S [A"tag", KInt ocamltag], S ([A"block", S [A"tag", KInt idristag], KInt idristag] ++
+        map (\(i,ty) -> S [A"apply", fromOCaml ty, S [A"field", KInt i, A"$d"]]) (zip [0..] tys))]
 
 cgSwitch e cases =
   S [A "let", S [scr, cgVar e],
