@@ -157,8 +157,12 @@ data OCaml_Type = OCaml_Int
                 | OCaml_String
                 | OCaml_Char
                 | OCaml_List OCaml_Type
-                | OCaml_Data [(Int, [OCaml_Type])]
+                | OCaml_Data [(Int, [OCaml_DataType])]
                 deriving (Show)
+
+data OCaml_DataType = Const OCaml_Type
+                    | Rec
+                    deriving (Show)
 
 ocamlType :: FDesc -> OCaml_Type
 ocamlType (FCon ffiType)
@@ -171,23 +175,25 @@ ocamlType (FApp (UN ffiType) params)
   | str ffiType == "OCaml_Data" = OCaml_Data (ocamlData $ head params)
 ocamlType what = error $ "ocamlType: " ++ show what
 
-ocamlData :: FDesc -> [(Int, [OCaml_Type])]
+ocamlData :: FDesc -> [(Int, [OCaml_DataType])]
 ocamlData = (withTags 0 0) . ocamlData'
   where
-    ocamlData' :: FDesc -> [[OCaml_Type]]
+    ocamlData' :: FDesc -> [[OCaml_DataType]]
     ocamlData' (FApp fn _) | fn == sUN "Nil" = []
     ocamlData' (FApp fn [_,t,ts]) | fn == sUN "::" = ocamlCon t : ocamlData' ts
     ocamlData' what = error $ "ocamlData': oh no: " ++ show what
 
-    withTags :: Int -> Int -> [[OCaml_Type]] -> [(Int, [OCaml_Type])]
+    withTags :: Int -> Int -> [[OCaml_DataType]] -> [(Int, [OCaml_DataType])]
     withTags _ _ [] = []
     withTags zeroargs someargs ([] : ts) = (zeroargs, []) : withTags (zeroargs + 1) someargs ts
     withTags zeroargs someargs (t : ts) = (someargs, t) : withTags zeroargs (someargs + 1) ts
 
-ocamlCon :: FDesc -> [OCaml_Type]
+ocamlCon :: FDesc -> [OCaml_DataType]
 ocamlCon (FApp fn _) | fn == sUN "Nil" = []
-ocamlCon (FApp fn [_,_,_,t]) | fn == sUN "MkDPair" = [ocamlType t]
+ocamlCon (FApp fn [_,_,_,t]) | fn == sUN "MkDPair" = [Const $ ocamlType t]
 ocamlCon (FApp fn [_,t,ts]) | fn == sUN "::" = ocamlCon t ++ ocamlCon ts
+ocamlCon (FApp fn [_,t]) | fn == sUN "Const" = ocamlCon t
+ocamlCon (FApp fn _) | fn == sUN "Rec" = [Rec]
 ocamlCon what = error $ "ocamlCon: oh no: " ++ show what
 
 toOCaml :: OCaml_Type -> Sexp
@@ -200,23 +206,60 @@ fromOCaml (OCaml_List t) = S [A "apply", A "$%unmklist", fromOCaml t]
 fromOCaml (OCaml_Data d) = unmkdata d
 fromOCaml _ = S [A "lambda", S [A "$x"], A "$x"]
 
-mkdata :: [(Int, [OCaml_Type])] -> Sexp
-mkdata d = S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ map mkcase (zip [0..] d))]
-  where
-    mkcase :: (Int, (Int, [OCaml_Type])) -> Sexp
-    mkcase (idristag, (ocamlint, [])) = S [S [A"tag", KInt idristag], KInt ocamlint]
-    mkcase (idristag, (ocamltag, tys)) =
-      S [S [A"tag", KInt idristag], S ([A"block", S [A"tag", KInt ocamltag]] ++
-        map (\(i,ty) -> S [A"apply", toOCaml ty, S [A"field", KInt i, A"$d"]]) (zip [1..] tys))]
+mkdata :: [(Int, [OCaml_DataType])] -> Sexp
+mkdata d = S [A"lambda", S [A"$d"], S [A"let", 
+             S [A"rec", S [A"$%mkdata",
+               S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ mkcases (zip [0..] d))]]],
+             S [A"apply", A"$%mkdata", A"$d"]]]
 
-unmkdata :: [(Int, [OCaml_Type])] -> Sexp
-unmkdata d = S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ map mkcase (zip [0..] d))]
   where
-    mkcase :: (Int, (Int, [OCaml_Type])) -> Sexp
-    mkcase (idristag, (ocamlint, [])) = S [KInt ocamlint, S [A"block", S [A"tag", KInt idristag], KInt idristag]]
-    mkcase (idristag, (ocamltag, tys)) =
-      S [S [A"tag", KInt ocamltag], S ([A"block", S [A"tag", KInt idristag], KInt idristag] ++
-        map (\(i,ty) -> S [A"apply", fromOCaml ty, S [A"field", KInt i, A"$d"]]) (zip [0..] tys))]
+
+    mkcases :: [(Int, (Int, [OCaml_DataType]))] -> [Sexp]
+    mkcases [x] = [S [S [A"tag", KInt 0], mkcons x]]
+    mkcases (x : xs) =
+      [S [S [A"tag", KInt 0], mkcons x],
+          S [S [A"tag", KInt 1],
+            S [A"apply", S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ mkcases xs)],
+                         S [A"field", KInt 1, A"$d"]]]]
+    
+    mkcons :: (Int, (Int, [OCaml_DataType])) -> Sexp
+    mkcons (idristag, (ocamlint, [])) = KInt ocamlint
+    mkcons (idristag, (ocamltag, tys)) =
+      S ([A"block", S [A"tag", KInt ocamltag]] ++
+        map (\(i,ty) -> S [A"apply", mktype ty, S [A"field", KInt i, S [A"field", KInt 1, A"$d"]]]) (zip [1..] tys))
+
+    mktype :: OCaml_DataType -> Sexp
+    mktype (Const ty) =
+      S [A"lambda", S [A"$d"], S [A"apply", toOCaml ty, S [A"field", KInt 1, A"$d"]]]
+    mktype Rec =
+      S [A"lambda", S [A"$d"], S [A"apply", A"$%mkdata", S [A"field", KInt 1, S [A"field", KInt 1, A"$d"]]]]
+
+unmkdata :: [(Int, [OCaml_DataType])] -> Sexp
+unmkdata d = S [A"lambda", S [A"$d"], S [A"let", 
+               S [A"rec", S [A"$%unmkdata",
+                 S [A"lambda", S [A"$d"], S ([A"switch", A"$d"] ++ map unmkcase (zip [0..] d))]]],
+               S [A"apply", A"$%unmkdata", A"$d"]]]
+
+  where
+
+    unmkcase :: (Int, (Int, [OCaml_DataType])) -> Sexp
+    unmkcase (idristag, (ocamlint, [])) = S [KInt ocamlint, sums idristag (products [])]
+    unmkcase (idristag, (ocamltag, tys)) = S [S [A"tag", KInt ocamltag], sums idristag (products $ zip [0..] tys)]
+    
+    sums :: Int -> Sexp -> Sexp
+    sums 0 s = S [A"block", S [A"tag", KInt 0], KInt 0, s]
+    sums i s = S [A"block", S [A"tag", KInt 1], KInt 1, sums (i - 1) s]
+  
+    products :: [(Int, OCaml_DataType)] -> Sexp
+    products [] = S [A"block", S [A"tag", KInt 0], KInt 0]
+    products ((i,t) : ts) = S [A"block", S [A"tag", KInt 1], KInt 1, unmktype i t, products ts]
+  
+    unmktype :: Int -> OCaml_DataType -> Sexp
+    unmktype i (Const ty) =
+      S [A"block", S [A"tag", KInt 0], KInt 0, S [A"apply", fromOCaml ty, S [A"field", KInt i, A"$d"]]]
+    unmktype i Rec =
+      S [A"block", S [A"tag", KInt 1], KInt 1, S [A"apply", A"$%unmkdata", S [A"field", KInt i, A"$d"]]]
+
 
 cgSwitch e cases =
   S [A "let", S [scr, cgVar e],
